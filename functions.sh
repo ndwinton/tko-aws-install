@@ -60,16 +60,11 @@ function requireValue {
 
   for varName in $*
   do
-    if [[ -z "${!varName}" ]]
+    if [[ -z $(echo -n "${!varName}") ]]
     then
-      fatal "Variable $varName is missing at line $(caller)"
+      fatal "Value for variable $varName is missing at line $(caller)"
     fi
   done
-}
-
-function hostIp {
-  # This works on both macOS and Linux
-  ifconfig -a | awk '/^(en|wl)/,/(inet |status|TX error)/ { if ($1 == "inet") { print $2; exit; } }'
 }
 
 function aws {
@@ -84,6 +79,39 @@ function aws {
     --rm -v $(pwd):/aws amazon/aws-cli "$@"
 }
 
+function findAvailabilityZones {
+  aws ec2 describe-availability-zones | jq -r '.AvailabilityZones[].ZoneName'
+}
+
+function checkAvailabilityZones {
+  local azNames=$(findAvailabilityZones)
+  local azCount=$(echo $azNames | wc -w)
+
+  if (($azCount < 3))
+  then
+    message "WARNING: Too few availability zones. Need 3 for production deployment but only found $azCount"
+  fi
+}
+
+function setupWorkingDirectory {
+  requireValue WORKING_DIR TKG_INSTALL_TAG
+
+  banner "Setting up working state directory"
+
+  if [[ -d $WORKING_DIR ]]
+  then
+    message "Working state directory $WORKING_DIR already exists"
+    if [[ $TKG_INSTALL_TAG != $(<$WORKING_DIR/TKG_INSTALL_TAG) ]]
+    then
+      fatal "TKG_INSTALL_TAG value '$(<$WORKING_DIR/TKG_INSTALL_TAG)' for working state directory $WORKING_DIR does not match supplied value '$TKG_INSTALL_TAG'"
+    fi
+  else
+    message "Creating state directory $WORKING_DIR"
+    mkdir -p $WORKING_DIR
+    echo -n $TKG_INSTALL_TAG > $WORKING_DIR/TKG_INSTALL_TAG
+  fi
+}
+
 function createVpc {
   banner "Creating VPC"
 
@@ -91,13 +119,15 @@ function createVpc {
   then
     message "Using previously created VPC"
   else
-    aws ec2 create-vpc --cidr-block 172.16.0.0/16 --tag-specifications 'ResourceType=vpc, Tags=[{Key=Name,Value=TKGVPC}]'  --output json > $WORKING_DIR/vpc
+    aws ec2 create-vpc --cidr-block 172.16.0.0/16 --tag-specifications "ResourceType=vpc, Tags=[{Key=Name,Value=TKGVPC-$TKG_INSTALL_TAG}]"  --output json > $WORKING_DIR/vpc
   fi
-  message "VPC ID: $(findVpcId)"
+  local vpcId=$(findVpcId)
+  requireValue vpcId
+  message "VPC ID: $vpcId"
 }
 
 function usableState {
-  [[ -r $1 && -s $1 ]]
+  [[ -r $1 && -s $1 ]] && egrep -q '^[^[:space:]]+$' $1
 }
 
 function findId {
@@ -129,7 +159,7 @@ function createSubnets {
 
   for type in priv pub
   do
-    for az in $azNames
+    for az in $(findAvailabilityZones)
     do
       azSuffix=${az#$AWS_REGION}
       if usableState $WORKING_DIR/subnet-$type-$azSuffix
@@ -154,6 +184,7 @@ function createSubnets {
   for subnetFile in $WORKING_DIR/subnet-pub-*
   do
     subnetId=$(findSubnetIdFor $subnetFile)
+    requireValue subnetId
     aws ec2 modify-subnet-attribute --subnet-id "$subnetId" --map-public-ip-on-launch
     message "Modified $subnetId"
   done
@@ -173,13 +204,15 @@ function createInternetGateway {
     aws ec2 create-internet-gateway  --output json > $WORKING_DIR/inet-gw
   fi
   local inetGwId=$(findInternetGwId)
+  requireValue inetGwId
   message "Internet Gateway ID: $inetGwId"
   message "Applying tags to gateway"
   aws ec2 create-tags \
     --resources $inetGwId \
-    --tags Key=Name,Value="tkg-inet-gw"
+    --tags Key=Name,Value="tkg-inet-gw-$TKG_INSTALL_TAG"
 
   local vpcId=$(findVpcId)
+  requireValue vpcId
   local currentAttachments=$(aws ec2 describe-internet-gateways \
       --internet-gateway-ids $inetGwId | \
       jq -r .InternetGateways[].Attachments[].VpcId)
@@ -208,6 +241,7 @@ function createNatGateway {
     aws ec2 allocate-address > $WORKING_DIR/nat-eip
   fi
   local allocationId=$(findIpAllocationId)
+  requireValue allocationId
   message "Allocation ID: $allocationId"
 
   if usableState $WORKING_DIR/nat-gw
@@ -220,6 +254,7 @@ function createNatGateway {
       --output json > $WORKING_DIR/nat-gw
   fi
   local natGwId=$(findNatGwId)
+  requireValue natGwId
   message "NAT Gateway ID: $natGwId"
 }
 
@@ -242,6 +277,7 @@ function createTransitGateway {
     aws ec2 create-transit-gateway --description "For TKG Transit" > $WORKING_DIR/transit-gw
   fi
   local tgwId=$(findTransitGwId)
+  requireValue tgwId
   message "Transit Gateway ID: $tgwId"
 
   waitForTransitGateway $tgwId
@@ -250,14 +286,15 @@ function createTransitGateway {
   then
     message "Using existing transit gateway VPC attachment"
   else
-  message "Creating transit gateway VPC attachments"
+    message "Creating transit gateway VPC attachments"
     aws ec2 create-transit-gateway-vpc-attachment \
       --transit-gateway-id  $tgwId \
       --vpc-id $(findVpcId) \
       $(findSubnetIdFor <(cat $WORKING_DIR/subnet-priv-*) | sed -e 's/^/--subnet-ids /') \
       --output json > $WORKING_DIR/attachment_transit_gw
   fi
-  local attachmentId=$(findTransitGwAttachementId)
+  local attachmentId=$(findTransitGwAttachmentId)
+  requireValue attachmentId
   message "Transit Gateway Attachment ID: $attachmentId"
 }
 
@@ -269,6 +306,7 @@ function transitGatewayState {
   local tgwId=$1
   aws ec2 describe-transit-gateways --transit-gateway-ids $tgwId | jq -r .TransitGateways[].State
 }
+
 function waitForTransitGateway {
   local tgwId=$1
   local state=$(transitGatewayState $tgwId)
@@ -280,7 +318,7 @@ function waitForTransitGateway {
   done
 }
 
-function findTransitGwAttachementId {
+function findTransitGwAttachmentId {
   findId .TransitGatewayVpcAttachment.TransitGatewayAttachmentId $WORKING_DIR/attachment_transit_gw
 }
 
@@ -294,29 +332,33 @@ function createPrivateRouteTable {
     aws ec2 create-route-table --vpc-id  $(findVpcId) --output json > $WORKING_DIR/priv-rt
   fi
   local privateRouteTableId=$(findPrivateRouteTableId)
+  requireValue privateRouteTableId
   message "Private Route Table ID: $privateRouteTableId"
 
   message "Adding tags"
-  aws ec2 create-tags --resources $privateRouteTableId --tags 'Key=Name,Value=tkgvpc-priv-rt'
+  aws ec2 create-tags --resources $privateRouteTableId --tags "Key=Name,Value=tkgvpc-priv-rt-$TKG_INSTALL_TAG"
 
-  message "Creating NAT route"
+  message "Creating NAT route (ignore any RouteAlreadyExists errors)"
   aws ec2 create-route \
     --route-table-id $privateRouteTableId \
     --destination-cidr-block "0.0.0.0/0" \
     --nat-gateway-id $(findNatGwId)
 
   message "Creating transit gateway route"
+  local transitGwId=$(findTransitGwId)
+  waitForTransitGateway $transitGwId
   # Route any corporate IPs through your transit gw
   aws ec2 create-route \
     --route-table-id $privateRouteTableId \
     --destination-cidr-block "172.16.0.0/12" \
-    --transit-gateway-id $(findTransitGwId)
+    --transit-gateway-id $transitGwId
 
   message "Associating private route table with subnets"
   local subnetFile subnetId
   for subnetFile in $WORKING_DIR/subnet-priv-*
   do
     subnetId="$(findSubnetIdFor $subnetFile)"
+    requireValue subnetId
     aws ec2 associate-route-table \
       --subnet-id $subnetId \
       --route-table-id $privateRouteTableId \
@@ -343,10 +385,11 @@ function createPublicRouteTable {
     aws ec2 create-route-table --vpc-id  $(findVpcId) --output json > $WORKING_DIR/pub-rt
   fi
   local publicRouteTableId=$(findPublicRouteTableId)
-    message "Public Route Table ID: $publicRouteTableId"
+  requireValue publicRouteTableId
+  message "Public Route Table ID: $publicRouteTableId"
 
   message "Adding tags"
-  aws ec2 create-tags --resources $publicRouteTableId --tags 'Key=Name,Value=tkgvpc-pub-rt'
+  aws ec2 create-tags --resources $publicRouteTableId --tags "Key=Name,Value=tkgvpc-pub-rt-$TKG_INSTALL_TAG"
 
   message "Creating internet gateway route"
   aws ec2 create-route \
@@ -355,17 +398,20 @@ function createPublicRouteTable {
   --gateway-id $(findInternetGwId)
 
   message "Creating transit gateway route"
+  local transitGwId=$(findTransitGwId)
+  waitForTransitGateway $transitGwId
   # Route any corporate IPs through your transit gw
   aws ec2 create-route \
   --route-table-id $publicRouteTableId \
   --destination-cidr-block "172.16.0.0/12" \
-  --transit-gateway-id $(findTransitGwId)
+  --transit-gateway-id $transitGwId
 
   message "Associating public route table with subnets"
   local subnetFile subnetId
   for subnetFile in $WORKING_DIR/subnet-pub-*
   do
     subnetId="$(findSubnetIdFor $subnetFile)"
+    requireValue subnetId
     aws ec2 associate-route-table \
       --subnet-id $subnetId \
       --route-table-id $publicRouteTableId \
@@ -392,18 +438,24 @@ function findAmi {
 function createJumpbox {
   banner "Creating jumpbox"
 
-  message "Setting up jumpbox-ssh security group"
-  aws ec2 create-security-group \
-    --group-name "jumpbox-ssh" \
-    --description "To Jumpbox" \
-    --vpc-id "$(findVpcId)" --output json > $WORKING_DIR/sg_jumpbox_ssh
-
+  if usableState $WORKING_DIR/sg_jumpbox_ssh
+  then
+    message "Using previously created security group"
+  else
+    message "Setting up jumpbox-ssh security group"
+    aws ec2 create-security-group \
+      --group-name "jumpbox-ssh-$TKG_INSTALL_TAG" \
+      --description "To Jumpbox $TKG_INSTALL_TAG" \
+      --vpc-id "$(findVpcId)" --output json > $WORKING_DIR/sg_jumpbox_ssh
+  fi
   local groupId=$(findId .GroupId $WORKING_DIR/sg_jumpbox_ssh)
+  requireValue groupId
+
   aws ec2 create-tags \
     --resources $groupId \
-    --tags Key=Name,Value="jumpbox-ssh"
+    --tags Key=Name,Value="jumpbox-ssh-$TKG_INSTALL_TAG"
 
-  message "Authorizing SSH to jumpbox"
+  message "Authorizing SSH to jumpbox (ignore any InvalidPermission.Duplicate errors)"
   aws ec2 authorize-security-group-ingress \
     --group-id  $groupId --protocol tcp --port 22 --cidr "0.0.0.0/0"
 
@@ -413,23 +465,203 @@ function createJumpbox {
   then
     message "Using previously created key-pair"
   else
-    aws ec2 create-key-pair --key-name tkg-kp --query 'KeyMaterial' --output text > $WORKING_DIR/tkgkp.pem
+    aws ec2 create-key-pair --key-name tkg-kp-$TKG_INSTALL_TAG --query 'KeyMaterial' --output text > $WORKING_DIR/tkgkp.pem
     chmod 400 $WORKING_DIR/tkgkp.pem
   fi
 
-# Using AMI for Focal Fossa (Ubuntu 20.04)
-  local amiId=$(findAmi $AWS_REGION focal | head -n 1)
-  aws ec2 run-instances \
-    --image-id $amiId \
-    --count 1 \
-    --instance-type t2.medium \
-    --key-name tkg-kp \
-    --security-group-ids $groupId \
-    --subnet-id $(findSubnetIdFor $WORKING_DIR/subnet-pub-a) \
-    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=tkg-jumpbox}]' \
-    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=64}' > $WORKING_DIR/instance_jb_starting
+  if usableState $WORKING_DIR/instance_jb_starting
+  then
+    message "Using previously created jumpbox"
+  else
+    # Using AMI for Focal Fossa (Ubuntu 20.04)
+    local amiId=$(findAmi $AWS_REGION focal | head -n 1)
+    requireValue amiId
+    aws ec2 run-instances \
+      --image-id $amiId \
+      --count 1 \
+      --instance-type t2.medium \
+      --key-name tkg-kp-$TKG_INSTALL_TAG \
+      --security-group-ids $groupId \
+      --subnet-id $(findSubnetIdFor $WORKING_DIR/subnet-pub-a) \
+      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=tkg-jumpbox-$TKG_INSTALL_TAG}]" \
+      --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=64}' > $WORKING_DIR/instance_jb_starting
+  fi
+
+  waitForJumpbox
 }
 
 function findJumpboxId {
   findId '.Instances[0].InstanceId' $WORKING_DIR/instance_jb_starting
+}
+
+function waitForJumpbox {
+  local jumpboxIp
+  local status=not-ready
+
+  while [[ $status != 'up-and-running' ]]
+  do
+    message "Waiting for jumpbox ..."
+    sleep 10
+    jumpboxIp=$(findJumpboxPublicIp)
+    status=$(ssh ubuntu@$jumpboxIp \
+      -i $WORKING_DIR/tkgkp.pem \
+      -oStrictHostKeyChecking=accept-new \
+      echo 'up-and-running')
+  done
+  message "Jumpbox ready"
+}
+
+_CACHED_JB_IP_=''
+function findJumpboxPublicIp {
+
+  if [[ "$_CACHED_JB_IP_" != "" ]]
+  then
+    echo $_CACHED_JB_IP_
+    return 0
+  fi
+
+  local instanceId=$(findJumpboxId)
+  requireValue instanceId
+  aws ec2 describe-instances --instance-id $instanceId > $WORKING_DIR/instance_jb_started
+  local ip=$(findId '.Reservations[0].Instances[0].PublicIpAddress' $WORKING_DIR/instance_jb_started)
+  if [[ "$ip" =~ *.*.*.* ]]
+  then
+    _CACHED_JB_IP_=$ip
+  fi
+  echo $ip
+}
+
+function runOnJumpbox {
+  local jumpboxIp=$(findJumpboxPublicIp)
+  requireValue jumpboxIp
+  ssh -i $WORKING_DIR/tkgkp.pem ubuntu@$jumpboxIp "$@"
+}
+
+function copyToJumpbox {
+  local jumpboxIp=$(findJumpboxPublicIp)
+  requireValue jumpboxIp
+  scp -i $WORKING_DIR/tkgkp.pem "$1" ubuntu@$jumpboxIp:/home/ubuntu/$2
+}
+
+function updateJumpbox {
+  banner "Updating and installing base software on jumpbox"
+
+  cat > $WORKING_DIR/update-jumpbox.sh <<'EOF'
+#!/bin/sh
+
+set -x
+
+sudo apt update -y
+sudo apt install -y docker.io screen
+sudo adduser ubuntu docker
+sudo reboot
+EOF
+  copyToJumpbox $WORKING_DIR/update-jumpbox.sh
+
+  message "Executing update script (system will reboot)"
+  runOnJumpbox /bin/sh /home/ubuntu/update-jumpbox.sh
+
+  waitForJumpbox
+}
+
+function installTanzuSoftware {
+  banner "Installing Tanzu software on jumpbox"
+
+  cat > $WORKING_DIR/install-tanzu-software.sh <<'EOSH'
+#!/bin/sh
+
+set -x
+
+# Find latest modified gzip file, in case of multiple uploads
+kubectl_gzip=$(ls -1tr kubectl-linux-*.gz | tail -n 1)
+kubectl_base=${kubectl_gzip%.gz}
+gunzip $kubectl_gzip
+sudo install $kubectl_base /usr/local/bin/kubectl
+
+# Install kind (useful for early failure debugging)
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.12.0/kind-linux-amd64
+chmod +x ./kind
+sudo install kind /usr/local/bin/kind
+
+rm -rf ./cli
+tar -xvf tanzu-cli-bundle-linux-amd64.tar
+cd cli/
+sudo install core/v1.*/tanzu-core-linux_amd64 /usr/local/bin/tanzu
+gunzip *.gz
+sudo install imgpkg-linux-amd64-* /usr/local/bin/imgpkg
+sudo install kapp-linux-amd64-* /usr/local/bin/kapp
+sudo install kbld-linux-amd64-* /usr/local/bin/kbld
+sudo install vendir-linux-amd64-* /usr/local/bin/vendir
+sudo install ytt-linux-amd64-* /usr/local/bin/ytt
+cd ..
+tanzu plugin install --local cli all
+
+# Create custom Load Balancer control file
+tanzu config init
+cat <<EOF > ~/.config/tanzu/tkg/providers/ytt/03_customizations/internal_lb.yaml
+#@ load("@ytt:overlay", "overlay")
+#@ load("@ytt:data", "data")
+
+#@overlay/match by=overlay.subset({"kind":"AWSCluster"})
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha3
+kind: AWSCluster
+spec:
+#@overlay/match missing_ok=True
+  controlPlaneLoadBalancer:
+#@overlay/match missing_ok=True
+    scheme: "internal"
+
+EOF
+EOSH
+
+  message "Copying files to jumpbox"
+
+  copyToJumpbox $WORKING_DIR/install-tanzu-software.sh
+  copyToJumpbox $DOWNLOADED_KUBECTL
+
+  # Because the CLI bundle is so big, try to avoid copying this
+  local cliSha=$(shasum $DOWNLOADED_TANZU_CLI_BUNDLE | awk '{ print $1; }')
+  local remoteCliSha=$(runOnJumpbox shasum /home/ubuntu/tanzu-cli-bundle-linux-amd64.tar | awk '{ print $1; }')
+  if [[ "$cliSha" == "$remoteCliSha" ]]
+  then
+    message "Tanzu CLI bundle already up to date - not copied"
+  else
+    copyToJumpbox $DOWNLOADED_TANZU_CLI_BUNDLE tanzu-cli-bundle-linux-amd64.tar
+  fi
+
+  message "Running install script"
+
+  runOnJumpbox /bin/sh /home/ubuntu/install-tanzu-software.sh
+}
+
+function startInstaller {
+  banner "Starting TKG installer"
+
+  local credentials="$(aws sts get-session-token)"
+  requireValue credentials
+  local sessionAccessKeyId=$(echo "$credentials" | jq -r .Credentials.AccessKeyId)
+  local sessionSecretAccessKey=$(echo "$credentials" | jq -r .Credentials.SecretAccessKey)
+  local sessionToken=$(echo "$credentials" | jq -r .Credentials.SessionToken)
+
+  cat <<EOT
+
+The TKG installer will be running on http://localhost:8080.
+
+=== NOTE ===
+Temporary session credentials have been generated and are shown
+below. These are NOT the values you supplied to this script.
+
+The following information will be needed during the installation:
+
+  * Access Key ID: $sessionAccessKeyId
+  * Secret Access Key:$sessionSecretAccessKey
+  * Session Token: $sessionToken
+  * Region: $AWS_REGION
+  * SSH key name: tkg-kp-$TKG_INSTALL_TAG
+  * VPC ID: $(findVpcId)
+
+EOT
+
+  runOnJumpbox -L 8080:localhost:8080 tanzu management-cluster create --ui
 }

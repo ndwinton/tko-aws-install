@@ -7,7 +7,7 @@ banner "Setting up environment"
 findOrPrompt AWS_ACCESS_KEY_ID "AWS Access Key ID" true
 findOrPrompt AWS_SECRET_ACCESS_KEY "AWS Secret Access Key" true
 findOrPromptWithDefault AWS_REGION "Region with at least 3 available AZs" us-east-1
-findOrPromptWithDefault WORKING_DIR "Working directory" $(pwd)/tkg-vpc
+findOrPromptWithDefault WORKING_DIR "Working directory" $(pwd)/tkg-install-*
 
 export AWS_ACCESS_KEY_ID
 export AWS_SECRET_ACCESS_KEY
@@ -16,12 +16,33 @@ export AWS_DEFAULT_REGION="$AWS_REGION"
 
 if [[ ! -d $WORKING_DIR ]]
 then
-  "Working directory $WORKING_DIR not found"
+  fatal "Working directory $WORKING_DIR not found"
+fi
+
+if [[ ! -f $WORKING_DIR/TKG_INSTALL_TAG ]]
+then
+  fatal "Installation tag file $WORKING_DIR/TKG_INSTALL_TAG not found"
+else
+  export TKG_INSTALL_TAG=$(<$WORKING_DIR/TKG_INSTALL_TAG)
 fi
 
 banner "Starting cleanup"
 
-if [[ -f $WORKING_DIR/pub-rt-associations ]]
+if usableState $WORKING_DIR/instance_jb_started
+then
+  instanceId=$(findJumpboxId)
+  message "Terminating jumpbox instance $instanceId"
+  aws ec2 terminate-instances --instance-ids $instanceId
+fi
+
+if usableState $WORKING_DIR/sg_jumpbox_ssh
+then
+  groupId=$(findId .GroupId $WORKING_DIR/sg_jumpbox_ssh)
+  message "Removing security group $groupId"
+  aws ec2 delete-security-group --group-id $groupId
+fi
+
+if usableState $WORKING_DIR/pub-rt-associations
 then
   for associationId in $(findPublicAssociationIds)
   do
@@ -30,7 +51,7 @@ then
   done
 fi
 
-if [[ -f $WORKING_DIR/pub-rt ]]
+if usableState $WORKING_DIR/pub-rt
 then
   routeTableId=$(findPublicRouteTableId)
   message "Deleting public route table $routeTableId"
@@ -38,7 +59,7 @@ then
 fi
 
 
-if [[ -f $WORKING_DIR/priv-rt-associations ]]
+if usableState $WORKING_DIR/priv-rt-associations
 then
   for associationId in $(findPrivateAssociationIds)
   do
@@ -47,42 +68,42 @@ then
   done
 fi
 
-if [[ -f $WORKING_DIR/priv-rt ]]
+if usableState -f $WORKING_DIR/priv-rt
 then
   routeTableId=$(findPrivateRouteTableId)
   message "Deleting private route table $routeTableId"
   aws ec2 delete-route-table --route-table-id $routeTableId
 fi
 
-if [[ -f $WORKING_DIR/attachment_transit_gw ]]
+if usableState $WORKING_DIR/attachment_transit_gw
 then
-  attachmentId=$(findTransitGwAttachementId)
+  attachmentId=$(findTransitGwAttachmentId)
   message "Deleting transit gateway VPC attachment $attachmentId"
   aws ec2 delete-transit-gateway-vpc-attachment --transit-gateway-attachment-id=$attachmentId
 fi
 
-if [[ -f $WORKING_DIR/transit-gw ]]
+if usableState $WORKING_DIR/transit-gw
 then
   tgwId=$(findTransitGwId)
   message "Deleting created transit gateway $tgwId"
   aws ec2 delete-transit-gateway --transit-gateway-id=$tgwId
 fi
 
-if [[ -f $WORKING_DIR/nat-gw ]]
+if usableState $WORKING_DIR/nat-gw
 then
   natGwId=$(findNatGwId)
   message "Deleting NAT gateway $natGwId"
   aws ec2 delete-nat-gateway --nat-gateway-id=$natGwId
 fi
 
-if [[ -f $WORKING_DIR/nat-eip ]]
+if usableState $WORKING_DIR/nat-eip
 then
   allocationId=$(findIpAllocationId)
   message "Releasing IP address allocation $allocationId"
   aws ec2 release-address --allocation-id=$allocationId
 fi
 
-if [[ -f $WORKING_DIR/inet-gw ]]
+if usableState $WORKING_DIR/inet-gw
 then
   vpcId=$(findVpcId)
   inetGwId=$(findInternetGwId)
@@ -93,7 +114,7 @@ fi
 
 for subnetFile in $WORKING_DIR/subnet-*
 do
-  if [[ -f $subnetFile ]]
+  if usableState $subnetFile
   then
     subnetId=$(findSubnetIdFor $subnetFile)
     message "Deleting subnet $subnetId"
@@ -101,7 +122,7 @@ do
   fi
 done
 
-if [[ -f $WORKING_DIR/vpc ]]
+if usableState $WORKING_DIR/vpc
 then
   vpcId=$(findVpcId)
   message "Deleting VPC $vpcId"
