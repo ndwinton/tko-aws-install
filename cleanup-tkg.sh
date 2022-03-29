@@ -68,7 +68,7 @@ then
   done
 fi
 
-if usableState -f $WORKING_DIR/priv-rt
+if usableState $WORKING_DIR/priv-rt
 then
   routeTableId=$(findPrivateRouteTableId)
   message "Deleting private route table $routeTableId"
