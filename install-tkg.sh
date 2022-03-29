@@ -8,7 +8,7 @@ findOrPrompt AWS_ACCESS_KEY_ID "AWS Access Key ID" true
 findOrPrompt AWS_SECRET_ACCESS_KEY "AWS Secret Access Key" true
 findOrPromptWithDefault AWS_REGION "Region with at least 3 available AZs" us-east-1
 findOrPromptWithDefault TKG_INSTALL_TAG "Unique tag for this installation" $(date +%Y%m%d)
-findOrPromptWithDefault WORKING_DIR "Working directory" $(pwd)/tkg-install-$TKG_INSTALL_TAG
+findOrPromptWithDefault TKG_INSTALL_STATE_DIR "Installation state directory" $(pwd)/tkg-install-$TKG_INSTALL_TAG
 
 defaultCliDownload=$(find . ~/Downloads -name 'tanzu-cli-bundle-linux-amd64.tar' | head -n 1)
 defaultKubectlDownload=$(find . ~/Downloads -name 'kubectl-linux-*+vmware.*.gz' | head -n 1)
@@ -20,7 +20,10 @@ export AWS_ACCESS_KEY_ID
 export AWS_SECRET_ACCESS_KEY
 export AWS_REGION
 export AWS_DEFAULT_REGION="$AWS_REGION"
-export WORKING_DIR
+# The variable WORKING_DIR is used within the scripts to better
+# align with the deployment documentation, but the external name
+# of TKG_INSTALL_STATE_DIR is more descriptive for users.
+export WORKING_DIR="$TKG_INSTALL_STATE_DIR"
 export DOWNLOADED_TANZU_CLI_BUNDLE
 export DOWNLOADED_KUBECTL
 

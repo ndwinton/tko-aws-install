@@ -7,16 +7,19 @@ banner "Setting up environment"
 findOrPrompt AWS_ACCESS_KEY_ID "AWS Access Key ID" true
 findOrPrompt AWS_SECRET_ACCESS_KEY "AWS Secret Access Key" true
 findOrPromptWithDefault AWS_REGION "Region with at least 3 available AZs" us-east-1
-findOrPromptWithDefault WORKING_DIR "Working directory" $(pwd)/tkg-install-*
+# The wildcard on the next line will result in the alphabetically first
+# state directory, if any, being selected as the default
+findOrPromptWithDefault TKG_INSTALL_STATE_DIR "Installation state directory" $(pwd)/tkg-install-*
 
 export AWS_ACCESS_KEY_ID
 export AWS_SECRET_ACCESS_KEY
 export AWS_REGION
 export AWS_DEFAULT_REGION="$AWS_REGION"
+export WORKING_DIR="$TKG_INSTALL_STATE_DIR"
 
 if [[ ! -d $WORKING_DIR ]]
 then
-  fatal "Working directory $WORKING_DIR not found"
+  fatal "State directory $WORKING_DIR not found"
 fi
 
 if [[ ! -f $WORKING_DIR/TKG_INSTALL_TAG ]]
