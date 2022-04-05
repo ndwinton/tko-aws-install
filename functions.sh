@@ -435,6 +435,51 @@ function findAmi {
     sed -ne "/\"$region\".*\"$codename\".*\"amd64\".*\"hvm:ebs-ssd\"/s/.*launchAmi=\(ami-[a-f0-9]*\).*/\1/p"
 }
 
+function createCloudFormationStackIfNecessary {
+  banner "Checking for IAM resources"
+
+  local template="$1"
+  local instanceProfiles=$(aws iam list-instance-profiles | jq -r '.InstanceProfiles[].InstanceProfileName' | sort | grep '\.tkg\.cloud\.vmware.com$')
+  local policies=$(aws iam list-policies --scope Local | jq -r '.Policies[].PolicyName' | sort | grep '\.tkg\.cloud\.vmware.com$')
+  local roles=$(aws iam list-roles | jq -r '.Roles[].RoleName' | sort | grep '\.tkg\.cloud\.vmware.com$')
+  if [[ "$instanceProfiles/$policies/$roles" == "//" ]]
+  then
+    createCloudFormationStack "$1"
+  else
+    checkIamResources 'instance profile' $instanceProfiles
+    checkIamResources 'policy' $policies
+    checkIamResources 'role' $roles
+    message "All necessary resources already exist"
+  fi
+}
+
+function checkIamResources {
+  local -A present
+  local expected="control-plane.tkg.cloud.vmware.com controllers.tkg.cloud.vmware.com nodes.tkg.cloud.vmware.com"
+  local resource="$1"
+  shift
+
+  local arg
+  for arg in $*
+  do
+    present[$arg]="true"
+  done
+
+  # OK if all expected elements are there, fatal error otherwise
+  for arg in $expected
+  do
+    [[ "${present[$arg]}" == "true" ]] || fatal "Missing some IAM resources of type $resource" \
+      "Expected: $expected" \
+      "Found: $*"
+  done
+}
+
+function createCloudFormationStack {
+  message "Creating tkg-cloud-vmware-com CloudFormation stack"
+
+  aws cloudformation create-stack --stack-name tkg-cloud-vmware-com --template-body "$(< $1)" --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+}
+
 function createJumpbox {
   banner "Creating jumpbox"
 

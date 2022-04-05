@@ -30,6 +30,8 @@ export DOWNLOADED_KUBECTL
 [[ -r $DOWNLOADED_TANZU_CLI_BUNDLE ]] || fatal "Can't find or read Tanzu CLI bundle file $DOWNLOADED_TANZU_CLI_BUNDLE"
 [[ -r $DOWNLOADED_KUBECTL ]] || fatal "Can't find or read kubectl gzip file DOWNLOADED_KUBECTL"
 
+FORMATION_TEMPLATE="$(dirname $0)/tkg-cloud-vwmare-com.cloudformation.yaml"
+
 setupWorkingDirectory
 checkAvailabilityZones
 createVpc
@@ -42,4 +44,5 @@ createPublicRouteTable
 createJumpbox
 updateJumpbox
 installTanzuSoftware
+createCloudFormationStackIfNecessary "$FORMATION_TEMPLATE"
 startInstaller
